@@ -52,23 +52,33 @@ async function updateRanking(guild) {
     .setColor('Gold')
     .setDescription('Atualizado automaticamente');
 
-  rankingArray.forEach((user, index) => {
-    embed.addFields({
-      name: `#${index + 1}`,
-      value: `<@${user[0]}> — ${user[1].points} pontos`
+  if (rankingArray.length === 0) {
+    embed.setDescription('Nenhum ponto registrado ainda.');
+  } else {
+    rankingArray.forEach((user, index) => {
+      embed.addFields({
+        name: `#${index + 1}`,
+        value: `<@${user[0]}> — ${user[1].points} pontos`
+      });
     });
-  });
+  }
 
-  const messages = await channel.messages.fetch();
-  await channel.bulkDelete(messages);
+  const messages = await channel.messages.fetch({ limit: 10 });
+  const botMessage = messages.find(m => m.author.id === client.user.id);
 
-  await channel.send({ embeds: [embed] });
+  if (botMessage) {
+    await botMessage.edit({ embeds: [embed] });
+  } else {
+    await channel.send({ embeds: [embed] });
+  }
 
-  // Atualizar cargos Top 3
+  // ===== Atualizar Top 3 =====
   const members = await guild.members.fetch();
 
   for (let pos = 1; pos <= 3; pos++) {
     const roleId = config.topRoles[pos];
+    if (!roleId) continue;
+
     const role = guild.roles.cache.get(roleId);
     if (!role) continue;
 
@@ -115,17 +125,21 @@ const commands = [
 client.once('ready', async () => {
   console.log(`Bot online como ${client.user.tag}`);
 
-  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+  try {
+    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
-  await rest.put(
-    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-    { body: commands }
-  );
+    await rest.put(
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      { body: commands }
+    );
 
-  console.log('Slash commands registrados.');
+    console.log('Slash commands registrados.');
+  } catch (err) {
+    console.error('Erro ao registrar comandos:', err);
+  }
 });
 
-// ================= EVENTOS =================
+// ================= EVENTO PROVA =================
 
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
@@ -228,9 +242,10 @@ client.on('interactionCreate', async interaction => {
     }
 
     writeDB('./database/ranking.json', ranking);
-    updateRanking(interaction.guild);
 
-    return interaction.reply({ content: 'Ranking atualizado.', ephemeral: true });
+    await interaction.reply({ content: 'Ranking atualizado.', ephemeral: true });
+
+    updateRanking(interaction.guild);
   }
 
 });
