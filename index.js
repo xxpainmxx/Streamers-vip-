@@ -1,94 +1,85 @@
 require('dotenv').config();
-const fs = require('fs');
-const cron = require('node-cron');
 const {
   Client,
   GatewayIntentBits,
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  SlashCommandBuilder,
   REST,
   Routes,
+  SlashCommandBuilder,
   PermissionsBitField
 } = require('discord.js');
-
+const fs = require('fs');
 const config = require('./config.json');
+
+const token = process.env.TOKEN;
+const clientId = process.env.CLIENT_ID;
+const guildId = process.env.GUILD_ID;
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMembers
   ]
 });
 
-
-// ===================== CRIAR DATABASE AO INICIAR =====================
-
-if (!fs.existsSync('./database')) {
-  fs.mkdirSync('./database');
+// ===== Banco simples JSON =====
+let db = {};
+if (fs.existsSync('database.json')) {
+  db = JSON.parse(fs.readFileSync('database.json'));
 }
 
-if (!fs.existsSync('./database/ranking.json')) {
-  fs.writeFileSync('./database/ranking.json', '{}');
+function saveDB() {
+  fs.writeFileSync('database.json', JSON.stringify(db, null, 2));
 }
 
-if (!fs.existsSync('./database/proofs.json')) {
-  fs.writeFileSync('./database/proofs.json', '{}');
-}
+// ===== Registrar Slash Commands =====
+const commands = [
+  new SlashCommandBuilder()
+    .setName('addpoints')
+    .setDescription('Adicionar pontos a um membro')
+    .addUserOption(option =>
+      option.setName('usuario')
+        .setDescription('Usuário')
+        .setRequired(true))
+    .addIntegerOption(option =>
+      option.setName('quantidade')
+        .setDescription('Quantidade de pontos')
+        .setRequired(true)),
 
+  new SlashCommandBuilder()
+    .setName('ranking')
+    .setDescription('Ver ranking atual'),
 
-// ===================== DATABASE FUNCTIONS =====================
+  new SlashCommandBuilder()
+    .setName('resetranking')
+    .setDescription('Resetar ranking semanal')
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
+].map(cmd => cmd.toJSON());
 
-function readDB(path) {
-  return JSON.parse(fs.readFileSync(path));
-}
+const rest = new REST({ version: '10' }).setToken(token);
 
-function writeDB(path, data) {
-  fs.writeFileSync(path, JSON.stringify(data, null, 2));
-}
+(async () => {
+  await rest.put(
+    Routes.applicationGuildCommands(clientId, guildId),
+    { body: commands }
+  );
+  console.log('✅ Slash commands registrados');
+})();
 
-
-// ===================== UPDATE RANKING =====================
-
+// ===== Atualizar Ranking e Cargos =====
 async function updateRanking(guild) {
-  const ranking = readDB('./database/ranking.json');
+  const rankingArray = Object.entries(db)
+    .sort((a, b) => b[1] - a[1]);
 
-  const rankingArray = Object.entries(ranking)
-    .sort((a, b) => b[1].points - a[1].points)
-    .slice(0, 10);
-
-  const channel = guild.channels.cache.get(config.rankingChannelId);
-  if (!channel) return;
-
-  const embed = new EmbedBuilder()
-    .setTitle('🏆 Ranking Semanal - Streamers VIP')
-    .setColor('Gold');
-
-  if (rankingArray.length === 0) {
-    embed.setDescription('Nenhum ponto registrado ainda.');
-  } else {
-    rankingArray.forEach((user, index) => {
-      embed.addFields({
-        name: `#${index + 1}`,
-        value: `<@${user[0]}> — ${user[1].points} pontos`
-      });
+  const rankingChannel = guild.channels.cache.get(config.rankingChannelId);
+  if (rankingChannel) {
+    let message = `🏆 **Ranking Streamers VIP**\n\n`;
+    rankingArray.slice(0, 10).forEach((user, index) => {
+      message += `**${index + 1}º** <@${user[0]}> — ${user[1]} pts\n`;
     });
+    rankingChannel.send(message);
   }
 
-  const messages = await channel.messages.fetch({ limit: 10 });
-  const botMessage = messages.find(m => m.author.id === client.user.id);
-
-  if (botMessage) {
-    await botMessage.edit({ embeds: [embed] });
-  } else {
-    await channel.send({ embeds: [embed] });
-  }
-
-  const members = await guild.members.fetch();
-
+  // Atualizar Top 3
   for (let pos = 1; pos <= 3; pos++) {
     const roleId = config.topRoles[pos];
     if (!roleId) continue;
@@ -96,104 +87,68 @@ async function updateRanking(guild) {
     const role = guild.roles.cache.get(roleId);
     if (!role) continue;
 
-    members.forEach(member => {
-      if (member.roles.cache.has(roleId)) {
-        member.roles.remove(roleId).catch(() => {});
-      }
+    // Remove cargo de quem tem
+    role.members.forEach(member => {
+      member.roles.remove(roleId).catch(() => {});
     });
 
+    // Dá para novo top
     if (rankingArray[pos - 1]) {
-      const member = guild.members.cache.get(rankingArray[pos - 1][0]);
-      if (member) member.roles.add(roleId).catch(() => {});
+      const member = await guild.members.fetch(rankingArray[pos - 1][0]).catch(() => null);
+      if (member) {
+        member.roles.add(roleId).catch(() => {});
+      }
     }
   }
 }
 
-
-// ===================== RESET SEMANAL =====================
-
-cron.schedule('0 0 * * 1', () => {
-  writeDB('./database/ranking.json', {});
-  console.log('Ranking resetado automaticamente.');
-});
-
-
-// ===================== SLASH COMMANDS =====================
-
-const commands = [
-  new SlashCommandBuilder()
-    .setName('addpoints')
-    .setDescription('Adicionar pontos')
-    .addUserOption(option =>
-      option.setName('usuario').setDescription('Usuário').setRequired(true))
-    .addIntegerOption(option =>
-      option.setName('quantidade').setDescription('Quantidade').setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName('removepoints')
-    .setDescription('Remover pontos')
-    .addUserOption(option =>
-      option.setName('usuario').setDescription('Usuário').setRequired(true))
-    .addIntegerOption(option =>
-      option.setName('quantidade').setDescription('Quantidade').setRequired(true))
-].map(cmd => cmd.toJSON());
-
-
-client.once('ready', async () => {
-  console.log(`Bot online como ${client.user.tag}`);
-
-  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-
-  await rest.put(
-    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-    { body: commands }
-  );
-
-  console.log('Slash commands registrados.');
-});
-
-
-// ===================== INTERACTIONS =====================
-
+// ===== Interações =====
 client.on('interactionCreate', async interaction => {
-
   if (!interaction.isChatInputCommand()) return;
 
-  if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-    return interaction.reply({ content: 'Sem permissão.', ephemeral: true });
+  const { commandName } = interaction;
+
+  if (commandName === 'addpoints') {
+    const user = interaction.options.getUser('usuario');
+    const amount = interaction.options.getInteger('quantidade');
+
+    if (!db[user.id]) db[user.id] = 0;
+    db[user.id] += amount;
+    saveDB();
+
+    await interaction.reply(`✅ ${amount} pontos adicionados para ${user.username}`);
+
+    await updateRanking(interaction.guild);
   }
 
-  const ranking = readDB('./database/ranking.json');
-  const user = interaction.options.getUser('usuario');
-  const amount = interaction.options.getInteger('quantidade');
+  if (commandName === 'ranking') {
+    const rankingArray = Object.entries(db)
+      .sort((a, b) => b[1] - a[1]);
 
-  if (amount <= 0) {
-    return interaction.reply({ content: 'Quantidade inválida.', ephemeral: true });
+    let message = `🏆 **Ranking Atual**\n\n`;
+    rankingArray.slice(0, 10).forEach((user, index) => {
+      message += `**${index + 1}º** <@${user[0]}> — ${user[1]} pts\n`;
+    });
+
+    await interaction.reply(message);
   }
 
-  if (!ranking[user.id]) ranking[user.id] = { points: 0 };
-
-  if (interaction.commandName === 'addpoints') {
-    ranking[user.id].points += amount;
+  if (commandName === 'resetranking') {
+    db = {};
+    saveDB();
+    await interaction.reply('♻️ Ranking resetado com sucesso!');
   }
-
-  if (interaction.commandName === 'removepoints') {
-    ranking[user.id].points -= amount;
-    if (ranking[user.id].points < 0) ranking[user.id].points = 0;
-  }
-
-  writeDB('./database/ranking.json', ranking);
-
-  await interaction.reply({ content: 'Ranking atualizado.', ephemeral: true });
-
-  updateRanking(interaction.guild);
 });
 
+// ===== Reset Automático Semanal =====
+setInterval(() => {
+  db = {};
+  saveDB();
+  console.log('♻️ Reset semanal automático executado');
+}, 1000 * 60 * 60 * 24 * 7);
 
-// ===================== ERRO GLOBAL =====================
-
-process.on('unhandledRejection', error => {
-  console.error('Erro não tratado:', error);
+client.once('ready', () => {
+  console.log(`🚀 Bot online como ${client.user.tag}`);
 });
 
-client.login(process.env.TOKEN);
+client.login(token);
