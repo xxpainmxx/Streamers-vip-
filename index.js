@@ -24,16 +24,31 @@ const client = new Client({
   ]
 });
 
-// ================= DATABASE =================
+
+// ================= DATABASE SAFE SYSTEM =================
+
+function ensureFile(path) {
+  const dir = path.split('/').slice(0, -1).join('/');
+
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  if (!fs.existsSync(path)) {
+    fs.writeFileSync(path, '{}');
+  }
+}
 
 function readDB(path) {
-  if (!fs.existsSync(path)) fs.writeFileSync(path, '{}');
+  ensureFile(path);
   return JSON.parse(fs.readFileSync(path));
 }
 
 function writeDB(path, data) {
+  ensureFile(path);
   fs.writeFileSync(path, JSON.stringify(data, null, 2));
 }
+
 
 // ================= UPDATE RANKING =================
 
@@ -49,8 +64,7 @@ async function updateRanking(guild) {
 
   const embed = new EmbedBuilder()
     .setTitle('🏆 Ranking Semanal - Streamers VIP')
-    .setColor('Gold')
-    .setDescription('Atualizado automaticamente');
+    .setColor('Gold');
 
   if (rankingArray.length === 0) {
     embed.setDescription('Nenhum ponto registrado ainda.');
@@ -95,12 +109,14 @@ async function updateRanking(guild) {
   }
 }
 
+
 // ================= RESET SEMANAL =================
 
 cron.schedule('0 0 * * 1', () => {
   writeDB('./database/ranking.json', {});
   console.log('Ranking resetado automaticamente.');
 });
+
 
 // ================= REGISTRAR SLASH COMMANDS =================
 
@@ -122,6 +138,7 @@ const commands = [
       option.setName('quantidade').setDescription('Quantidade').setRequired(true))
 ].map(cmd => cmd.toJSON());
 
+
 client.once('ready', async () => {
   console.log(`Bot online como ${client.user.tag}`);
 
@@ -138,6 +155,7 @@ client.once('ready', async () => {
     console.error('Erro ao registrar comandos:', err);
   }
 });
+
 
 // ================= EVENTO PROVA =================
 
@@ -176,6 +194,7 @@ client.on('messageCreate', async message => {
     staffChannel.send({ embeds: [embed], components: [row] });
   }
 });
+
 
 // ================= INTERACTIONS =================
 
