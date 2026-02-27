@@ -7,7 +7,11 @@ const {
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  PermissionsBitField
 } = require('discord.js');
 
 const config = require('./config.json');
@@ -20,9 +24,10 @@ const client = new Client({
   ]
 });
 
-// ================= DATABASE UTILS =================
+// ================= DATABASE =================
 
 function readDB(path) {
+  if (!fs.existsSync(path)) fs.writeFileSync(path, '{}');
   return JSON.parse(fs.readFileSync(path));
 }
 
@@ -30,10 +35,11 @@ function writeDB(path, data) {
   fs.writeFileSync(path, JSON.stringify(data, null, 2));
 }
 
-// ================= RANKING UPDATE =================
+// ================= UPDATE RANKING =================
 
 async function updateRanking(guild) {
   const ranking = readDB('./database/ranking.json');
+
   const rankingArray = Object.entries(ranking)
     .sort((a, b) => b[1].points - a[1].points)
     .slice(0, 10);
@@ -42,8 +48,9 @@ async function updateRanking(guild) {
   if (!channel) return;
 
   const embed = new EmbedBuilder()
-    .setTitle('🏆 Ranking Semanal')
-    .setColor('Gold');
+    .setTitle('🏆 Ranking Semanal - Streamers VIP')
+    .setColor('Gold')
+    .setDescription('Atualizado automaticamente');
 
   rankingArray.forEach((user, index) => {
     embed.addFields({
@@ -52,11 +59,14 @@ async function updateRanking(guild) {
     });
   });
 
-  await channel.messages.fetch().then(msgs => channel.bulkDelete(msgs));
+  const messages = await channel.messages.fetch();
+  await channel.bulkDelete(messages);
+
   await channel.send({ embeds: [embed] });
 
   // Atualizar cargos Top 3
   const members = await guild.members.fetch();
+
   for (let pos = 1; pos <= 3; pos++) {
     const roleId = config.topRoles[pos];
     const role = guild.roles.cache.get(roleId);
@@ -64,13 +74,13 @@ async function updateRanking(guild) {
 
     members.forEach(member => {
       if (member.roles.cache.has(roleId)) {
-        member.roles.remove(roleId);
+        member.roles.remove(roleId).catch(() => {});
       }
     });
 
     if (rankingArray[pos - 1]) {
       const member = guild.members.cache.get(rankingArray[pos - 1][0]);
-      if (member) member.roles.add(roleId);
+      if (member) member.roles.add(roleId).catch(() => {});
     }
   }
 }
@@ -79,29 +89,62 @@ async function updateRanking(guild) {
 
 cron.schedule('0 0 * * 1', () => {
   writeDB('./database/ranking.json', {});
-  console.log('Ranking resetado.');
+  console.log('Ranking resetado automaticamente.');
+});
+
+// ================= REGISTRAR SLASH COMMANDS =================
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName('addpoints')
+    .setDescription('Adicionar pontos a um usuário')
+    .addUserOption(option =>
+      option.setName('usuario').setDescription('Usuário').setRequired(true))
+    .addIntegerOption(option =>
+      option.setName('quantidade').setDescription('Quantidade').setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName('removepoints')
+    .setDescription('Remover pontos de um usuário')
+    .addUserOption(option =>
+      option.setName('usuario').setDescription('Usuário').setRequired(true))
+    .addIntegerOption(option =>
+      option.setName('quantidade').setDescription('Quantidade').setRequired(true))
+].map(cmd => cmd.toJSON());
+
+client.once('ready', async () => {
+  console.log(`Bot online como ${client.user.tag}`);
+
+  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+  await rest.put(
+    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+    { body: commands }
+  );
+
+  console.log('Slash commands registrados.');
 });
 
 // ================= EVENTOS =================
 
-client.once('ready', () => {
-  console.log(`Bot online como ${client.user.tag}`);
-});
-
 client.on('messageCreate', async message => {
+  if (message.author.bot) return;
   if (message.channel.id !== config.proofChannelId) return;
   if (!message.attachments.size) return;
 
   const proofs = readDB('./database/proofs.json');
+
   proofs[message.id] = {
     userId: message.author.id,
     status: 'pending'
   };
+
   writeDB('./database/proofs.json', proofs);
 
   const embed = new EmbedBuilder()
     .setTitle('Nova prova enviada')
-    .setDescription(`Usuário: <@${message.author.id}>`);
+    .setDescription(`Usuário: <@${message.author.id}>`)
+    .setColor('Blue');
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -115,38 +158,81 @@ client.on('messageCreate', async message => {
   );
 
   const staffChannel = message.guild.channels.cache.get(config.staffChannelId);
-  staffChannel.send({ embeds: [embed], components: [row] });
+  if (staffChannel) {
+    staffChannel.send({ embeds: [embed], components: [row] });
+  }
 });
 
+// ================= INTERACTIONS =================
+
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isButton()) return;
 
-  const proofs = readDB('./database/proofs.json');
-  const ranking = readDB('./database/ranking.json');
+  // BOTÕES
+  if (interaction.isButton()) {
 
-  const [action, msgId] = interaction.customId.split('_');
-  const proof = proofs[msgId];
-  if (!proof || proof.status !== 'pending') return;
+    const proofs = readDB('./database/proofs.json');
+    const ranking = readDB('./database/ranking.json');
 
-  if (action === 'approve') {
-    proof.status = 'approved';
-    if (!ranking[proof.userId]) {
-      ranking[proof.userId] = { points: 0 };
+    const [action, msgId] = interaction.customId.split('_');
+    const proof = proofs[msgId];
+
+    if (!proof || proof.status !== 'pending') {
+      return interaction.reply({ content: 'Prova já processada.', ephemeral: true });
     }
-    ranking[proof.userId].points += 3;
+
+    if (action === 'approve') {
+      proof.status = 'approved';
+
+      if (!ranking[proof.userId]) ranking[proof.userId] = { points: 0 };
+      ranking[proof.userId].points += 3;
+
+      writeDB('./database/ranking.json', ranking);
+      writeDB('./database/proofs.json', proofs);
+
+      await interaction.reply({ content: 'Prova aprovada +3 pontos.', ephemeral: true });
+      updateRanking(interaction.guild);
+    }
+
+    if (action === 'reject') {
+      proof.status = 'rejected';
+      writeDB('./database/proofs.json', proofs);
+
+      await interaction.reply({ content: 'Prova rejeitada.', ephemeral: true });
+    }
+  }
+
+  // SLASH COMMANDS
+  if (interaction.isChatInputCommand()) {
+
+    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+      return interaction.reply({ content: 'Sem permissão.', ephemeral: true });
+    }
+
+    const ranking = readDB('./database/ranking.json');
+    const user = interaction.options.getUser('usuario');
+    const amount = interaction.options.getInteger('quantidade');
+
+    if (amount <= 0) {
+      return interaction.reply({ content: 'Quantidade inválida.', ephemeral: true });
+    }
+
+    if (!ranking[user.id]) ranking[user.id] = { points: 0 };
+
+    if (interaction.commandName === 'addpoints') {
+      ranking[user.id].points += amount;
+    }
+
+    if (interaction.commandName === 'removepoints') {
+      ranking[user.id].points -= amount;
+      if (ranking[user.id].points < 0) ranking[user.id].points = 0;
+    }
 
     writeDB('./database/ranking.json', ranking);
-    writeDB('./database/proofs.json', proofs);
-
-    await interaction.reply({ content: 'Prova aprovada.', ephemeral: true });
     updateRanking(interaction.guild);
+
+    return interaction.reply({ content: 'Ranking atualizado.', ephemeral: true });
   }
 
-  if (action === 'reject') {
-    proof.status = 'rejected';
-    writeDB('./database/proofs.json', proofs);
-    await interaction.reply({ content: 'Prova rejeitada.', ephemeral: true });
-  }
 });
 
 client.login(process.env.TOKEN);
