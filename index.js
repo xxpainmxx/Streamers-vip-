@@ -25,32 +25,33 @@ const client = new Client({
 });
 
 
-// ================= DATABASE SAFE SYSTEM =================
+// ===================== CRIAR DATABASE AO INICIAR =====================
 
-function ensureFile(path) {
-  const dir = path.split('/').slice(0, -1).join('/');
-
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-
-  if (!fs.existsSync(path)) {
-    fs.writeFileSync(path, '{}');
-  }
+if (!fs.existsSync('./database')) {
+  fs.mkdirSync('./database');
 }
 
+if (!fs.existsSync('./database/ranking.json')) {
+  fs.writeFileSync('./database/ranking.json', '{}');
+}
+
+if (!fs.existsSync('./database/proofs.json')) {
+  fs.writeFileSync('./database/proofs.json', '{}');
+}
+
+
+// ===================== DATABASE FUNCTIONS =====================
+
 function readDB(path) {
-  ensureFile(path);
   return JSON.parse(fs.readFileSync(path));
 }
 
 function writeDB(path, data) {
-  ensureFile(path);
   fs.writeFileSync(path, JSON.stringify(data, null, 2));
 }
 
 
-// ================= UPDATE RANKING =================
+// ===================== UPDATE RANKING =====================
 
 async function updateRanking(guild) {
   const ranking = readDB('./database/ranking.json');
@@ -86,7 +87,6 @@ async function updateRanking(guild) {
     await channel.send({ embeds: [embed] });
   }
 
-  // ===== Atualizar Top 3 =====
   const members = await guild.members.fetch();
 
   for (let pos = 1; pos <= 3; pos++) {
@@ -110,7 +110,7 @@ async function updateRanking(guild) {
 }
 
 
-// ================= RESET SEMANAL =================
+// ===================== RESET SEMANAL =====================
 
 cron.schedule('0 0 * * 1', () => {
   writeDB('./database/ranking.json', {});
@@ -118,12 +118,12 @@ cron.schedule('0 0 * * 1', () => {
 });
 
 
-// ================= REGISTRAR SLASH COMMANDS =================
+// ===================== SLASH COMMANDS =====================
 
 const commands = [
   new SlashCommandBuilder()
     .setName('addpoints')
-    .setDescription('Adicionar pontos a um usuário')
+    .setDescription('Adicionar pontos')
     .addUserOption(option =>
       option.setName('usuario').setDescription('Usuário').setRequired(true))
     .addIntegerOption(option =>
@@ -131,7 +131,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('removepoints')
-    .setDescription('Remover pontos de um usuário')
+    .setDescription('Remover pontos')
     .addUserOption(option =>
       option.setName('usuario').setDescription('Usuário').setRequired(true))
     .addIntegerOption(option =>
@@ -142,131 +142,58 @@ const commands = [
 client.once('ready', async () => {
   console.log(`Bot online como ${client.user.tag}`);
 
-  try {
-    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
-    await rest.put(
-      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-      { body: commands }
-    );
-
-    console.log('Slash commands registrados.');
-  } catch (err) {
-    console.error('Erro ao registrar comandos:', err);
-  }
-});
-
-
-// ================= EVENTO PROVA =================
-
-client.on('messageCreate', async message => {
-  if (message.author.bot) return;
-  if (message.channel.id !== config.proofChannelId) return;
-  if (!message.attachments.size) return;
-
-  const proofs = readDB('./database/proofs.json');
-
-  proofs[message.id] = {
-    userId: message.author.id,
-    status: 'pending'
-  };
-
-  writeDB('./database/proofs.json', proofs);
-
-  const embed = new EmbedBuilder()
-    .setTitle('Nova prova enviada')
-    .setDescription(`Usuário: <@${message.author.id}>`)
-    .setColor('Blue');
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`approve_${message.id}`)
-      .setLabel('Aprovar')
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`reject_${message.id}`)
-      .setLabel('Rejeitar')
-      .setStyle(ButtonStyle.Danger)
+  await rest.put(
+    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+    { body: commands }
   );
 
-  const staffChannel = message.guild.channels.cache.get(config.staffChannelId);
-  if (staffChannel) {
-    staffChannel.send({ embeds: [embed], components: [row] });
-  }
+  console.log('Slash commands registrados.');
 });
 
 
-// ================= INTERACTIONS =================
+// ===================== INTERACTIONS =====================
 
 client.on('interactionCreate', async interaction => {
 
-  // BOTÕES
-  if (interaction.isButton()) {
+  if (!interaction.isChatInputCommand()) return;
 
-    const proofs = readDB('./database/proofs.json');
-    const ranking = readDB('./database/ranking.json');
-
-    const [action, msgId] = interaction.customId.split('_');
-    const proof = proofs[msgId];
-
-    if (!proof || proof.status !== 'pending') {
-      return interaction.reply({ content: 'Prova já processada.', ephemeral: true });
-    }
-
-    if (action === 'approve') {
-      proof.status = 'approved';
-
-      if (!ranking[proof.userId]) ranking[proof.userId] = { points: 0 };
-      ranking[proof.userId].points += 3;
-
-      writeDB('./database/ranking.json', ranking);
-      writeDB('./database/proofs.json', proofs);
-
-      await interaction.reply({ content: 'Prova aprovada +3 pontos.', ephemeral: true });
-      updateRanking(interaction.guild);
-    }
-
-    if (action === 'reject') {
-      proof.status = 'rejected';
-      writeDB('./database/proofs.json', proofs);
-
-      await interaction.reply({ content: 'Prova rejeitada.', ephemeral: true });
-    }
+  if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+    return interaction.reply({ content: 'Sem permissão.', ephemeral: true });
   }
 
-  // SLASH COMMANDS
-  if (interaction.isChatInputCommand()) {
+  const ranking = readDB('./database/ranking.json');
+  const user = interaction.options.getUser('usuario');
+  const amount = interaction.options.getInteger('quantidade');
 
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: 'Sem permissão.', ephemeral: true });
-    }
-
-    const ranking = readDB('./database/ranking.json');
-    const user = interaction.options.getUser('usuario');
-    const amount = interaction.options.getInteger('quantidade');
-
-    if (amount <= 0) {
-      return interaction.reply({ content: 'Quantidade inválida.', ephemeral: true });
-    }
-
-    if (!ranking[user.id]) ranking[user.id] = { points: 0 };
-
-    if (interaction.commandName === 'addpoints') {
-      ranking[user.id].points += amount;
-    }
-
-    if (interaction.commandName === 'removepoints') {
-      ranking[user.id].points -= amount;
-      if (ranking[user.id].points < 0) ranking[user.id].points = 0;
-    }
-
-    writeDB('./database/ranking.json', ranking);
-
-    await interaction.reply({ content: 'Ranking atualizado.', ephemeral: true });
-
-    updateRanking(interaction.guild);
+  if (amount <= 0) {
+    return interaction.reply({ content: 'Quantidade inválida.', ephemeral: true });
   }
 
+  if (!ranking[user.id]) ranking[user.id] = { points: 0 };
+
+  if (interaction.commandName === 'addpoints') {
+    ranking[user.id].points += amount;
+  }
+
+  if (interaction.commandName === 'removepoints') {
+    ranking[user.id].points -= amount;
+    if (ranking[user.id].points < 0) ranking[user.id].points = 0;
+  }
+
+  writeDB('./database/ranking.json', ranking);
+
+  await interaction.reply({ content: 'Ranking atualizado.', ephemeral: true });
+
+  updateRanking(interaction.guild);
+});
+
+
+// ===================== ERRO GLOBAL =====================
+
+process.on('unhandledRejection', error => {
+  console.error('Erro não tratado:', error);
 });
 
 client.login(process.env.TOKEN);
